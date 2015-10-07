@@ -22,25 +22,40 @@
 (defonce rows 20)
 (defonce cols 20)
 
-(defn key<-coord [{:keys [x y]}]
-  (+ x (* y cols)))
-
-(defn coord<-key [key]
-  {:x (mod key cols)
-   :y (int (/ key cols))})
-
 (defn random-coord []
   {:x (rand-int cols)
    :y (rand-int rows)})
 
+(defn new-random-coords [n old]
+  (let [old (into #{} old)]
+    (loop [result #{}]
+      (if (= n (count result))
+        result
+        (let [candidate (random-coord)]
+          (if (old candidate)
+            (recur result)
+            (recur (conj result candidate))))))))
+
 (defn create-board []
-  (apply merge {} (repeatedly 10 #(hash-map (key<-coord (random-coord)) :food))))
+  (let [obstacles (new-random-coords 10 #{})
+        food (new-random-coords 10 obstacles)]
+    (merge
+     (zipmap obstacles (repeat :obstacle))
+     (zipmap food (repeat :food)))))
+
 
 (defonce app-state (atom {:screen :title
                           :engine nil
-                          :board (create-board)
-                          :snake {:pieces (list {:x 10 :y 10} {:x 9 :y 10})
-                                  :direction :right}}))
+                          :board nil
+                          :snake nil
+                          :direction :right
+                          :dead nil
+                          :turns []}))
+
+(defn init-game [state]
+  (swap! state assoc
+         :board (create-board)
+         :snake (list {:x 10 :y 10} {:x 9 :y 10})))
 
 (defn read
   [{:keys [state] :as env} key params]
@@ -58,18 +73,38 @@
     :up    (update-in position [:y] #(mod (+ rows (dec %)) rows))))
 
 
-(defn move-snake [state]
+(defn valid-turn? [old new]
+  ((case old
+     (:right :left) #{:up :down}
+     (:up :down) #{:right :left}) new))
+
+
+(defn turn [state]
+  (let [old (:direction @state)]
+    (when-let [new (last (:turns @state))]
+      (when (valid-turn? old new)
+        (swap! state assoc
+               :direction new
+               :turns (butlast (:turns @state)))))))
+
+
+(defn move [state]
+  (turn state)
   (let [s (:snake @state)
-        next (next-position (first (:pieces s)) (:direction s))
-        key (key<-coord next)
-        kind (get (:board @state) key)]
+        next (next-position (first s) (:direction @state))
+        all-elems (merge (:board @state) (zipmap s (repeat :snake)))
+        kind (get all-elems next)]
     (case kind
+      (:snake
+       :obstacle) (do (swap! state update-in [:engine] js/clearInterval)
+                      (swap! state assoc
+                             :dead kind
+                             :screen :title))
       :food (swap! state assoc
-                   :snake (assoc s :pieces (conj (:pieces s) next))
-                   :board (dissoc (:board @state) key))
-      (swap! state assoc :snake
-             (assoc s :pieces (conj (butlast (:pieces s)) next))))
-    ))
+                   :snake (conj s next)
+                   :board (assoc (dissoc (:board @state) next)
+                                 (first (new-random-coords 1 (keys all-elems))) :food))
+      (swap! state assoc :snake (conj (butlast s) next)))))
 
 (defmulti mutate om/dispatch)
 
@@ -82,29 +117,39 @@
 
 (defmethod mutate 'start
   [{:keys [state]} _ {:keys [engine]}]
-  {:action #(swap! state assoc :engine engine)})
+  {:action #(do
+              (init-game state)
+              (swap! state assoc :engine engine))})
 
 (defmethod mutate 'move
   [{:keys [state]} _ _]
-  {:action #(move-snake state)})
+  {:action #(move state)})
 
 (defmethod mutate 'turn
   [{:keys [state]} _ {:keys [direction]}]
-  {:action #(do (swap! state assoc-in [:snake :direction] direction))})
+  {:action #(when (valid-turn? (or (first (:turns @state)) (:direction @state)) direction)
+              (println "STACKING TURN")
+              (swap! state update-in [:turns] conj direction))})
 
 
-(defn title-screen [c]
-  [:a.title-box
-   {:on-click #(do (om/transact! c '[(change-screen {:screen :game})])
-                   (om/transact! c `[(~'start {:engine ~(. js/window setInterval
-                                                           (fn [] (om/transact! c '[(move)])) 300)})]))}
-   [:.start-game "Start Game!"]])
+(defn title-screen [c dead]
+  [:.title-screen
+   (when dead [:.dead (case dead
+                        :snake "You ate yourleft."
+                        :obstacle "You crashed into an obstacle.")])
+   [:a.title-box
+    {:on-click #(do (om/transact! c '[(change-screen {:screen :game})])
+                    (om/transact! c `[(~'start {:engine ~(. js/window setInterval
+
+                                                            (fn [] (om/transact! c '[(move)])) 300)})]))}
+    [:.start-game (if dead
+                    "Try Again!"
+                    "Start Game!")]]])
 
 
-(defn style<-key [k]
-  (let [{:keys [x y]} (coord<-key k)]
-    {:style {:left (str (* (/ 100 rows) x) "vw")
-             :top (str (* (/ 100 cols) y) "vh")}}))
+(defn style<-coord [{:keys [x y]}]
+  {:style {:left (str (* (/ 100 rows) x) "vw")
+           :top (str (* (/ 100 cols) y) "vh")}})
 
 (defui Snake
   static om/IQuery
@@ -115,8 +160,8 @@
   (render [this]
     (let [{:keys [snake] :as props} (om/props this)]
       (html [:.snake
-             (for [p (:pieces snake)]
-               [:.snake-piece (style<-key (key<-coord p))])]))))
+             (for [p snake]
+               [:.snake-piece (style<-coord p)])]))))
 
 (def snake (om/factory Snake))
 
@@ -130,7 +175,7 @@
     (let [{:keys [board] :as props} (om/props this)]
       (html [:.board
              (for [[k v] board]
-               [:.food (style<-key k)])]))))
+               [:div (merge {:class (name v)} (style<-coord k))])]))))
 
 (def board (om/factory Board))
 
@@ -147,7 +192,7 @@
 
   static om/IQuery
   (query [this]
-    '[:screen :board :snake])
+    '[:screen :board :snake :dead])
 
   Object
   (componentDidMount [this]
@@ -157,9 +202,9 @@
     (. js/window removeEventListener "keydown" #(key-down-game this %)))
 
   (render [this]
-    (let [props (om/props this)]
+    (let [{:keys [dead] :as props} (om/props this)]
       (html (case (:screen props)
-              :title (title-screen this)
+              :title (title-screen this dead)
               :game [:.board-and-snake
                      (board props)
                      (snake props)]
