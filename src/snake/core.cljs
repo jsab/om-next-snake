@@ -52,10 +52,6 @@
                           :dead nil
                           :turns []}))
 
-(defn init-game [state]
-  (swap! state assoc
-         :board (create-board)
-         :snake (list {:x 10 :y 10} {:x 9 :y 10})))
 
 (defn read
   [{:keys [state] :as env} key params]
@@ -96,10 +92,9 @@
         kind (get all-elems next)]
     (case kind
       (:snake
-       :obstacle) (do (swap! state update-in [:engine] js/clearInterval)
-                      (swap! state assoc
-                             :dead kind
-                             :screen :title))
+       :obstacle) (swap! state assoc
+                         :dead kind
+                         :screen :title)
       :food (swap! state assoc
                    :snake (conj s next)
                    :board (assoc (dissoc (:board @state) next)
@@ -115,11 +110,20 @@
   [{:keys [state]} _ {:keys [screen]}]
   {:action #(swap! state assoc :screen screen)})
 
+(defmethod mutate 'init
+  [{:keys [state]} _ _]
+  {:action (swap! state assoc
+                  :board (create-board)
+                  :snake (list {:x 10 :y 10} {:x 9 :y 10})
+                  :direction :right)})
+
 (defmethod mutate 'start
   [{:keys [state]} _ {:keys [engine]}]
-  {:action #(do
-              (init-game state)
-              (swap! state assoc :engine engine))})
+  {:action #(swap! state assoc :engine engine)})
+
+(defmethod mutate 'stop
+  [{:keys [state]} _ _]
+  {:action #(swap! state update-in [:engine] js/clearInterval)})
 
 (defmethod mutate 'move
   [{:keys [state]} _ _]
@@ -128,9 +132,18 @@
 (defmethod mutate 'turn
   [{:keys [state]} _ {:keys [direction]}]
   {:action #(when (valid-turn? (or (first (:turns @state)) (:direction @state)) direction)
-              (println "STACKING TURN")
               (swap! state update-in [:turns] conj direction))})
 
+
+(def reconciler
+  (om/reconciler
+   {:state app-state
+    :parser (om/parser {:read read :mutate mutate})}))
+
+
+(defn new-game [c]
+  (om/transact! c '[(init)])
+  (om/transact! c '[(change-screen {:screen :game})]))
 
 (defn title-screen [c dead]
   [:.title-screen
@@ -138,10 +151,7 @@
                         :snake "You ate yourleft."
                         :obstacle "You crashed into an obstacle.")])
    [:a.title-box
-    {:on-click #(do (om/transact! c '[(change-screen {:screen :game})])
-                    (om/transact! c `[(~'start {:engine ~(. js/window setInterval
-
-                                                            (fn [] (om/transact! c '[(move)])) 300)})]))}
+    {:on-click #(new-game c)}
     [:.start-game (if dead
                     "Try Again!"
                     "Start Game!")]]])
@@ -165,12 +175,20 @@
 
 (def snake (om/factory Snake))
 
+
 (defui Board
   static om/IQuery
   (query [this]
     [:board])
 
   Object
+  (componentDidMount [this]
+    (om/transact! this `[(~'start {:engine ~(. js/window setInterval
+                                               (fn [] (om/transact! this '[(move)])) 300)})]))
+
+  (componentWillUnmount [this]
+    (om/transact! this '[(stop)]))
+
   (render [this]
     (let [{:keys [board] :as props} (om/props this)]
       (html [:.board
@@ -179,9 +197,12 @@
 
 (def board (om/factory Board))
 
+
 (defn key-down-game [c e]
   (when-let [key ((map-invert (select-keys KEY arrows)) (.-keyCode e))]
-    (om/transact! c `[(~'turn {:direction ~key})])))
+    (om/transact! c `[(~'turn {:direction ~key})]))
+  (when (= (:enter KEY) (.-keyCode e))
+    (new-game c)))
 
 
 (defui Game
@@ -211,16 +232,9 @@
               :end [:.end "END"])))))
 
 
-(def reconciler
-  (om/reconciler
-   {:state app-state
-    :parser (om/parser {:read read :mutate mutate})}))
-
 
 (om/add-root! reconciler
               Game (. js/document (getElementById "app")))
-
-
 
 
 (defn on-js-reload []
