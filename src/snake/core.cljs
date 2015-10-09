@@ -1,9 +1,6 @@
 (ns ^:figwheel-always snake.core
-  (:require-macros [cljs.core.async.macros :refer [go go-loop]])
   (:require [om.next :as om :refer-macros [defui]]
-            [om.core :as omo]
             [sablono.core :refer-macros [html]]
-            [cljs.core.async :refer [put! <! chan]]
             [clojure.set :refer [map-invert]]))
 
 (enable-console-print!)
@@ -36,12 +33,15 @@
             (recur result)
             (recur (conj result candidate))))))))
 
+
 (defn create-board []
   (let [obstacles (new-random-coords 10 #{})
         food (new-random-coords 10 obstacles)]
-    (merge
-     (zipmap obstacles (repeat :obstacle))
-     (zipmap food (repeat :food)))))
+    {:food food
+     :obstacles obstacles}))
+
+(defn create-snake []
+  {:pieces (list {:x 10 :y 10} {:x 9 :y 10})})
 
 
 (defonce app-state (atom {:screen :title
@@ -51,6 +51,21 @@
                           :direction :right
                           :dead nil
                           :turns []}))
+
+(declare reconciler)
+
+(defn start-engine! []
+  (swap! app-state update-in [:engine]
+         #(if-not %
+            (. js/window setInterval
+               (fn [] (om/transact! reconciler '[(move)])) 300)
+            %)))
+
+(defn stop-engine! []
+  (swap! app-state update-in [:engine]
+         #(if %
+            (js/clearInterval %)
+            %)))
 
 
 (defn read
@@ -86,44 +101,45 @@
 
 (defn move [state]
   (turn state)
-  (let [s (:snake @state)
+  (let [s (:pieces (:snake @state))
         next (next-position (first s) (:direction @state))
-        all-elems (merge (:board @state) (zipmap s (repeat :snake)))
+        all-elems (merge (zipmap (:food (:board @state)) (repeat :food))
+                         (zipmap (:obstacles (:board @state)) (repeat :obstacle))
+                         (zipmap s (repeat :snake)))
         kind (get all-elems next)]
     (case kind
       (:snake
-       :obstacle) (swap! state assoc
-                         :dead kind
-                         :screen :title)
-      :food (swap! state assoc
-                   :snake (conj s next)
-                   :board (assoc (dissoc (:board @state) next)
-                                 (first (new-random-coords 1 (keys all-elems))) :food))
-      (swap! state assoc :snake (conj (butlast s) next)))))
+       :obstacle) (do (stop-engine!)
+                      (swap! state assoc
+                             :dead kind
+                             :screen :title))
+      :food (swap! state #(-> % (assoc-in [:snake :pieces] (conj s next))
+                                (assoc-in [:board :food] (conj (disj (:food (:board @state)) next)
+                                                               (first (new-random-coords 1 (keys all-elems)))))))
+      (swap! state assoc-in [:snake :pieces] (conj (butlast s) next)))))
+
 
 (defmulti mutate om/dispatch)
 
+
 (defmethod mutate :default
   [_ _ _] {:quote true})
+
 
 (defmethod mutate 'change-screen
   [{:keys [state]} _ {:keys [screen]}]
   {:action #(swap! state assoc :screen screen)})
 
-(defmethod mutate 'init
-  [{:keys [state]} _ _]
-  {:action (swap! state assoc
-                  :board (create-board)
-                  :snake (list {:x 10 :y 10} {:x 9 :y 10})
-                  :direction :right)})
 
-(defmethod mutate 'start
-  [{:keys [state]} _ {:keys [engine]}]
-  {:action #(swap! state assoc :engine engine)})
-
-(defmethod mutate 'stop
+(defmethod mutate 'new-game
   [{:keys [state]} _ _]
-  {:action #(swap! state update-in [:engine] js/clearInterval)})
+  {:action #(do (swap! state assoc
+                       :board (create-board)
+                       :snake (create-snake)
+                       :direction :right
+                       :screen :game)
+                (start-engine!))})
+
 
 (defmethod mutate 'move
   [{:keys [state]} _ _]
@@ -141,59 +157,64 @@
     :parser (om/parser {:read read :mutate mutate})}))
 
 
-(defn new-game [c]
-  (om/transact! c '[(init)])
-  (om/transact! c '[(change-screen {:screen :game})]))
-
 (defn title-screen [c dead]
   [:.title-screen
    (when dead [:.dead (case dead
                         :snake "You ate yourleft."
                         :obstacle "You crashed into an obstacle.")])
    [:a.title-box
-    {:on-click #(new-game c)}
+    {:on-click #(om/transact! c '[(new-game)])}
     [:.start-game (if dead
                     "Try Again!"
                     "Start Game!")]]])
 
 
-(defn style<-coord [{:keys [x y]}]
-  {:style {:left (str (* (/ 100 rows) x) "vw")
-           :top (str (* (/ 100 cols) y) "vh")}})
-
-(defui Snake
+(defui Piece
   static om/IQuery
   (query [this]
-    [:snake])
+    '[:x :y])
 
   Object
   (render [this]
-    (let [{:keys [snake] :as props} (om/props this)]
-      (html [:.snake
-             (for [p snake]
-               [:.snake-piece (style<-coord p)])]))))
+    (let [{:keys [x y]} (om/props this)]
+      (html [:.piece {:style {:left (str (* (/ 100 rows) x) "vw")
+                              :top (str (* (/ 100 cols) y) "vh")}}]))))
+
+(def piece (om/factory Piece))
+
+
+(defui Snake
+  static om/IQueryParams
+  (params [this]
+    {:piece (om/get-query Piece)})
+
+  static om/IQuery
+  (query [this]
+    '[{:pieces ?piece}])
+
+  Object
+  (render [this]
+    (let [{:keys [pieces]} (om/props this)]
+      (html [:.snake (map piece pieces)]))))
 
 (def snake (om/factory Snake))
 
 
 (defui Board
+  static om/IQueryParams
+  (params [this]
+          {:piece (om/get-query Piece)})
+
   static om/IQuery
   (query [this]
-    [:board])
+    '[{:food [?piece]} {:obstacles [?piece]}])
 
   Object
-  (componentDidMount [this]
-    (om/transact! this `[(~'start {:engine ~(. js/window setInterval
-                                               (fn [] (om/transact! this '[(move)])) 300)})]))
-
-  (componentWillUnmount [this]
-    (om/transact! this '[(stop)]))
-
   (render [this]
-    (let [{:keys [board] :as props} (om/props this)]
+    (let [{:keys [food obstacles]} (om/props this)]
       (html [:.board
-             (for [[k v] board]
-               [:div (merge {:class (name v)} (style<-coord k))])]))))
+             [:.food (map piece food)]
+             [:.obstacles (map piece obstacles)]]))))
 
 (def board (om/factory Board))
 
@@ -202,7 +223,7 @@
   (when-let [key ((map-invert (select-keys KEY arrows)) (.-keyCode e))]
     (om/transact! c `[(~'turn {:direction ~key})]))
   (when (= (:enter KEY) (.-keyCode e))
-    (new-game c)))
+    (om/transact! c '[(new-game)])))
 
 
 (defui Game
@@ -213,7 +234,7 @@
 
   static om/IQuery
   (query [this]
-    '[:screen :board :snake :dead])
+    '[:screen :dead {:board ?board} {:snake ?snake}])
 
   Object
   (componentDidMount [this]
@@ -223,14 +244,13 @@
     (. js/window removeEventListener "keydown" #(key-down-game this %)))
 
   (render [this]
-    (let [{:keys [dead] :as props} (om/props this)]
+    (let [props (om/props this)]
       (html (case (:screen props)
-              :title (title-screen this dead)
+              :title (title-screen this (:dead props))
               :game [:.board-and-snake
-                     (board props)
-                     (snake props)]
+                     (board (:board props))
+                     (snake (:snake props))]
               :end [:.end "END"])))))
-
 
 
 (om/add-root! reconciler
