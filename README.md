@@ -1,10 +1,12 @@
 # snake
 
-FIXME: Write a one-line description of your library/project.
+A very simple snake game using Om.next.
 
 ## Overview
 
-FIXME: Write a paragraph about the library/project and highlight its goals.
+It was time for me to check out that Om thingie I heard often about so
+I made a very simple snake game just as a way to experiment with Om for
+the first time.
 
 ## Setup
 
@@ -30,10 +32,10 @@ To create a production build run:
     lein cljsbuild once min
 
 And open your browser in `resources/public/index.html`. You will not
-get live reloading, nor a REPL. 
+get live reloading, nor a REPL.
 
 ## License
 
-Copyright © 2014 FIXME
+Copyright © 2014 Jean-Sebastien A. Beaudry
 
 Distributed under the Eclipse Public License either version 1.0 or (at your option) any later version.
